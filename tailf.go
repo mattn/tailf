@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"sync"
 	"syscall"
 
@@ -70,7 +71,7 @@ func Follow(filename string, fromStart bool) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	if err := watch.Add(file.Name()); err != nil {
+	if err := watch.Add(path.Dir(file.Name())); err != nil {
 		return nil, err
 	}
 
@@ -205,7 +206,12 @@ func (f *follower) handleFileEvent(ev fsnotify.Event) error {
 	case isOp(ev, fsnotify.Write):
 		// the general case where we wake up those waiting
 		// for more data
-		return f.updateFile()
+		switch f.checkForTruncate() {
+		case nil:
+			return f.updateFile()
+		default:
+			return f.reopenFile()
+		}
 
 	case isOp(ev, fsnotify.Create):
 		// new file created with the same name
@@ -217,7 +223,12 @@ func (f *follower) handleFileEvent(ev fsnotify.Event) error {
 
 	case isOp(ev, fsnotify.Chmod):
 		// file might have been truncated
-		return f.checkForTruncate()
+		switch f.checkForTruncate() {
+		case nil:
+			return nil
+		default:
+			return f.reopenFile()
+		}
 
 	default:
 		panic(fmt.Sprintf("unknown event: %#v", ev))
@@ -289,15 +300,15 @@ func (f *follower) checkForTruncate() error {
 
 	f.mu.Unlock()
 	if os.IsNotExist(err) {
-		return ErrFileRemoved{fmt.Errorf("file was removed: %v", f.filename)}
+		return ErrFileRemoved{fmt.Errorf("File was removed: %v", f.filename)}
 	}
 	if err != nil {
 		return err
 	}
 
 	newSize := fi.Size()
-	if f.size > newSize {
-		err = f.reopenFile()
+	if newSize < f.size {
+		err = ErrFileTruncated{fmt.Errorf("File (%s) was truncated", f.filename)}
 	} else {
 		err = nil
 	}
